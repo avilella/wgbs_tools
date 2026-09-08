@@ -1,21 +1,22 @@
 import subprocess
 import os
 import os.path as op
-import numpy as np
-import pandas as pd
 from io import StringIO
 import multiprocessing
 import sys
 from pathlib import Path
+import shutil
+import numpy as np
+import pandas as pd
 
 
-path = Path(op.realpath(__file__))
-DIR = str(path.parent)
-# DIR = op.dirname(os.path.realpath(__file__)) + '/'
+current_file_path = Path(op.realpath(__file__))
+DIR = str(current_file_path.parent)
 
-SRC_DIR = op.join(path.parent.parent.parent, 'src/')
+SRC_DIR = op.join(current_file_path.parent.parent.parent, 'src/')
 pat_sampler = SRC_DIR + 'pat_sampler/pat_sampler'
 pat2beta_tool = SRC_DIR + 'pat2beta/stdin2beta'
+mask_pat_tool = SRC_DIR + 'pat2beta/mask_pat'
 collapse_pat_script = SRC_DIR + 'collapse_pat.pl'
 segment_tool = SRC_DIR + 'segment_betas/segmentor'
 cview_tool = SRC_DIR + 'cview/cview'
@@ -24,6 +25,8 @@ view_beta_script = SRC_DIR + 'view_beta.sh'
 view_lbeta_script = SRC_DIR + 'view_lbeta.sh'
 homog_tool = SRC_DIR + 'homog/homog'
 add_loci_tool = SRC_DIR + 'cpg2bed/add_loci'
+plot_marker_heatmap_script = SRC_DIR + 'R/plot_marker_heatmap.R'
+plot_tree_script = SRC_DIR + 'R/plot_circle.R'
 
 match_maker_tool = SRC_DIR + 'pipeline_wgbs/match_maker'
 patter_tool = SRC_DIR + 'pipeline_wgbs/patter'
@@ -33,7 +36,6 @@ bam_meth_split_tool = SRC_DIR + 'pipeline_wgbs/bam_split.sh'
 
 
 MAX_PAT_LEN = 150  # maximal read length in sites
-MAX_READ_LEN = 1000  # maximal read length in bp
 
 COORDS_COLS3 = ['chr', 'start', 'end']
 COORDS_COLS5 = COORDS_COLS3 + ['startCpG', 'endCpG']
@@ -78,8 +80,7 @@ class GenomeRefPaths:
             else:
                 if validate:
                     raise IllegalArgumentError('Invalid reference path: ' + path)
-                else:
-                    path = None
+                path = None
         return path
 
     def build_dir(self):
@@ -124,6 +125,28 @@ def mkdirp(dpath):
         Path(dpath).mkdir(parents=True, exist_ok=True)
     return dpath
 
+
+def check_samtools_version(major=1, minor=15, verbose=False):
+    # make sure samtools version >= major.minor
+    try:
+        t = subprocess.check_output(['samtools', '--version'])
+        existing_version = t.splitlines()[0].strip().split()[1].decode()
+        if verbose:
+            eprint('[wt] samtools path:', shutil.which('samtools'), sep='\t')
+            eprint('[wt] samtools version:', existing_version, sep='\t')
+        nums = existing_version.split('.')
+        cmajor = int(nums[0])
+        cminor = int(nums[1])
+        if cmajor != major:
+            return cmajor > major
+        return cminor >= minor
+    except Exception:
+        eprint('[wt] WARNING: failed to validate samtools version')
+        # failed to run samtools --version
+        pass
+    return False
+
+
 def check_executable(cmd, verbose=False):
     for p in os.environ['PATH'].split(":"):
         if os.access(op.join(p, cmd), os.X_OK):
@@ -163,6 +186,7 @@ def drop_dup_keep_order(lst):
 def validate_dir(directory):
     if not op.isdir(directory):
         raise IllegalArgumentError(f'Invalid directory:\n{directory}')
+    return directory
 
 
 def color_text(txt, cdict, scheme=16):
@@ -211,6 +235,7 @@ def add_GR_args(parser, required=False, bed_file=False, no_anno=False, expand=Fa
     region_or_sites = parser.add_mutually_exclusive_group(required=required)
     region_or_sites.add_argument('-s', '--sites', help='a CpG index range, of the form: "450000-450050"')
     region_or_sites.add_argument('-r', '--region', help='genomic region of the form "chr1:10,000-10,500"')
+    region_or_sites.add_argument('--array_id', help='Illumina array id, e.g. cg00001755')
     if bed_file:
         region_or_sites.add_argument('-L', '--bed_file', help='Bed file. Columns <chr, start, end>. '\
                 'For some features columns 4-5 should be <startCpG, endCpG> (run wgbstools convert -L BED_PATH)')
@@ -229,7 +254,7 @@ def add_multi_thread_args(parser):
             def_cpus = int(os.environ[cpu_env])
         else:
             def_cpus = multiprocessing.cpu_count()
-    except:
+    except Exception:
         def_cpus = 8
     parser.add_argument('-@', '--threads', type=int, default=def_cpus,
                         help='Number of threads to use (default: all available CPUs)')
@@ -244,7 +269,7 @@ def add_no_pat_arg(parser):
 
 def beta2vec(data, min_cov=1, na=np.nan):
     cond = data[:, 1] >= min_cov
-    vec = np.divide(data[:, 0], data[:, 1], where=cond)  # normalize to range [0, 1)
+    vec = np.divide(data[:, 0], data[:, 1], where=cond, out=None)  # normalize to range [0, 1)
     vec[~cond] = na
     return vec
 
@@ -265,21 +290,23 @@ def trim_to_uint8(data, lbeta = False):
     return data.astype(dtype)
 
 
+def beta_sanity_check(beta_path, genome):
+    # sanity test: make sure beta file has the correct number of sites
+    # (fits current genome)
+    nr_sites_in_beta = op.getsize(beta_path) // 2
+    if beta_path.endswith('.lbeta'):
+        nr_sites_in_beta /= 2
+    if int(nr_sites_in_beta) != genome.get_nr_sites():
+        eprint(f'[wt beta] WARNING: beta file size ({nr_sites_in_beta:,} sites)\n' \
+               f'          incomatible with current genome reference ' \
+               f'({genome.get_nr_sites():,} sites)')
+        return False
+    return True
 
-def load_beta_data2(beta_path, gr=None, bed=None):
-    if gr is not None and bed is not None:
-        eprint('Error: both gr and bed_path supplied')
-        raise IllegalArgumentError('Invalid usage of load_beta_data2')
-    elif gr is not None and bed is None:
-        return load_beta_data(beta_path, gr)
-    elif gr is None and bed is not None:
-        inds = load_dict_section(' -R ' + bed.bed_path, bed.genome)['idx'].values - 1
-        return load_beta_data(beta_path)[inds, :]
-    else:
-        return load_beta_data(beta_path, None)
 
-
-def load_beta_data(beta_path, sites=None):
+def load_beta_data(beta_path, sites=None, genome=None):
+    if genome is not None:
+        beta_sanity_check(beta_path, genome)
     suff = op.splitext(beta_path)[1]
     if not (op.isfile(beta_path) and (suff in ('.beta', '.lbeta', '.bin'))):
         raise IllegalArgumentError(f'Invalid beta file:\n{beta_path}')
@@ -304,9 +331,9 @@ def load_beta_data(beta_path, sites=None):
 
 
 def load_borders(bpath, gr, genome):
-    if bpath == False:
+    if bpath is False:
         return np.array([])
-    elif bpath == True:
+    if bpath is True:
         bpath = GenomeRefPaths(genome).blocks
         if bpath is None:
             eprint(f'[wt blocks] default blocks path not found: {bpath}')
@@ -393,6 +420,10 @@ def splitextgz(input_file):
     return b, suff
 
 
+def pretty_name(fpath):
+    return splitextgz(op.basename(fpath))[0]
+
+
 def safe_remove(fpath):
     if fpath is not None and op.isfile(fpath):
         os.remove(fpath)
@@ -451,10 +482,12 @@ def read_shell(command, **kwargs):
                    "Standard error was:\n{2}")
         raise IOError(message.format(proc.returncode, command, error.decode()))
 
+
 def bed2reg(df):
     if not set(COORDS_COLS3).issubset(set(df.columns)):
         raise IllegalArgumentError('[wt] missing coordinate columns in bed file')
-    return df['chr'] + ':' + df['start'].astype(str) + '-' + df['end'].astype(str)
+    return df['chr'].astype(str) + ':' + df['start'].astype(str) + '-' + df['end'].astype(str)
+
 
 def catch_BrokenPipeError():
     os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())

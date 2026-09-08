@@ -1,11 +1,9 @@
 import re
 import subprocess
-import sys
 import os
+import os.path as op
 from pathlib import Path
 import numpy as np
-import pandas as pd
-import os.path as op
 from utils_wgbs import IllegalArgumentError, GenomeRefPaths, eprint
 
 
@@ -19,15 +17,15 @@ def get_genome_name(gname):
         path = Path(op.realpath(__file__))
         refdir = op.join(op.join(path.parent.parent.parent, 'references'), 'default')
         return os.readlink(refdir)
-    else:
-        return gname
+    return gname
 
 
 class GenomicRegion:
-    def __init__(self, args=None, region=None, sites=None, genome_name=None):
+    def __init__(self, args=None, region=None, sites=None, array_id=None, genome_name=None):
         self.genome_name = get_genome_name(genome_name)
         self.chrom = None
         self.sites = sites
+        self.array_id = array_id
         self.region_str = region
         self.bp_tuple = None
         self.args = args
@@ -40,12 +38,17 @@ class GenomicRegion:
                 self.parse_sites(args.sites)
             elif args.region:
                 self.parse_region(args.region)
+            elif args.array_id:
+                self.parse_array_id(args.array_id)
         elif region is not None:
             self.genome = GenomeRefPaths(self.genome_name)
             self.parse_region(region)
         elif sites is not None:
             self.genome = GenomeRefPaths(self.genome_name)
             self.parse_sites(sites)
+        elif array_id is not None:
+            self.genome = GenomeRefPaths(self.genome_name)
+            self.parse_array_id(array_id)
         else:
             raise IllegalArgumentError(f'Invalid GR init {region}')
 
@@ -55,7 +58,7 @@ class GenomicRegion:
     def add_anno(self):
         if self.args is None or self.is_whole() or 'no_anno' not in self.args:
             return
-        elif self.args.no_anno:
+        if self.args.no_anno:
             return
         anno_path = self.genome.annotations
         if anno_path is None:
@@ -87,8 +90,7 @@ class GenomicRegion:
 
     def _chrome_size(self):
         df = self.genome.get_chrom_size_table()
-        return int(df[df['chr'] == self.chrom]['size'])
-
+        return int(df[df['chr'] == self.chrom]['size'].values[0])
 
     def find_region_format(self, region):
         region = region.replace(',', '')  # remove commas
@@ -156,7 +158,6 @@ class GenomicRegion:
             raise IllegalArgumentError(f'Invalid genomic region: {self.region_str}. No CpGs in range')
 
         s1, s2 = self._sites_str_to_tuple(res)
-        # s2 += 1     # non-inclusive
         return s1, s2
 
     def _sites_str_to_tuple(self, sites_str):
@@ -207,6 +208,28 @@ class GenomicRegion:
             msg = f'Failed retrieving locus for site {index} with command:\n{cmd}\n{e}'
             raise IllegalArgumentError(msg)
         return chrom, loc
+
+    def parse_array_id(self, array_id):
+        """ Parse input of the type --array_id (e.g cg00001755) """
+
+        # validate ID
+        if not (array_id.startswith('cg') and len(array_id) > 2 and array_id[2:].isdigit()):
+            eprint(f'ERROR: Invalid Illumina array id: {array_id}')
+            raise IllegalArgumentError('Invalid Illumina array ID')
+        # verify there is an Illumina map file
+        idict = self.genome.ilmn2cpg_dict
+        if idict is None or not op.isfile(idict):
+            raise IllegalArgumentError(f'Could not find Illumina map file: {idict}')
+
+        # Find cg ID in the map file
+        try:
+            cmd = f'gunzip -c {idict} | grep -w {array_id} | cut -f2'
+            cpg_ind = int(subprocess.check_output(cmd, shell=True).decode().strip())
+        except ValueError as e:
+            msg = f'Failed retrieving locus for site {array_id} with command:\n{cmd}\n{e}'
+            raise IllegalArgumentError(msg)
+
+        self.parse_sites(str(cpg_ind))
 
     def __str__(self):
         if self.sites is None:

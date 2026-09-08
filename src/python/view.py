@@ -1,11 +1,11 @@
 #!/usr/bin/python3 -u
 
 import argparse
-import numpy as np
 import os.path as op
-from utils_wgbs import load_beta_data2, validate_single_file, \
+import numpy as np
+from utils_wgbs import load_beta_data, validate_single_file, \
     IllegalArgumentError, catch_BrokenPipeError, view_beta_script, \
-    view_lbeta_script, eprint #, check_executable
+    view_lbeta_script, beta_sanity_check
 from genomic_region import GenomicRegion
 from cview import cview, subprocess_wrap_sigpipe, add_view_flags
 
@@ -26,13 +26,14 @@ from cview import cview, subprocess_wrap_sigpipe, add_view_flags
 ####################
 
 def view_other_bin(bin_path, args):
-    # view lbeta or bin files. Minimal support. Works very slow for whole genome.
+    # view bin files. Minimal support. Works very slow for whole genome.
     gr = GenomicRegion(args)
-    data = load_beta_data2(bin_path, gr=gr.sites)
+    data = load_beta_data(bin_path, gr.sites)
     np.savetxt('/dev/stdout', data, fmt='%s', delimiter='\t')
 
 
 def bview_build_cmd(beta_path, gr, bed_path):
+    beta_sanity_check(beta_path, gr.genome)
     # compose a shell command to output a beta file to stdout
     if beta_path.endswith('.beta'):
         vs = view_beta_script
@@ -50,20 +51,6 @@ def bview_build_cmd(beta_path, gr, bed_path):
     return cmd
 
 
-def beta_sanity_check(beta_path, genome):
-    # sanity test: make sure beta file has the correct number of sites 
-    # (fits current genome)
-    nr_sites_in_beta = int(op.getsize(beta_path) / 2)
-    if beta_path.endswith('.lbeta'):
-        nr_sites_in_beta /= 2
-    if nr_sites_in_beta != genome.get_nr_sites():
-        eprint(f'[wt beta] WARNING: beta file size ({nr_sites_in_beta:,} sites)\n' \
-               f'          incomatible with current genome reference ' \
-               f'({genome.get_nr_sites():,} sites)')
-        return False
-    return True
-
-
 def view_beta(beta_path, gr, opath, bed_path):
     """
     View beta file in given region/sites range/s
@@ -74,7 +61,6 @@ def view_beta(beta_path, gr, opath, bed_path):
     """
 
     cmd = bview_build_cmd(beta_path, gr, bed_path)
-    beta_sanity_check(beta_path, gr.genome)
 
     if opath is not None:
         if opath.endswith('.gz'):

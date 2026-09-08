@@ -2,14 +2,13 @@
 
 import argparse
 import sys
-import numpy as np
 import os.path as op
+from multiprocessing import Pool
 import pandas as pd
+import numpy as np
 from utils_wgbs import validate_single_file, validate_file_list, load_beta_data, \
                        beta2vec, IllegalArgumentError, eprint, \
-                       add_multi_thread_args, GenomeRefPaths
-from view import beta_sanity_check
-from multiprocessing import Pool
+                       add_multi_thread_args, GenomeRefPaths, beta_sanity_check
 
 # https://support.illumina.com/array/array_kits/infinium-methylationepic-beadchip-kit/downloads.html
 
@@ -41,13 +40,18 @@ def load_full_ref(args, genome):
     if (not args.EPIC) and (not args.ref):
         df = df[df['array'] == 450].reset_index(drop=True)
 
-    return df[['ilmn', 'cpg']]
+    df = df[['ilmn', 'cpg']]
+    # If hg38, filter unmapped CpGs
+    if genome.genome == 'hg38':
+        df = df.dropna(how='any')
+        df['cpg'] = df['cpg'].astype(int)
+    return df
 
 
 def read_reference(args):
 
     genome = GenomeRefPaths(args.genome)
-    if not (beta_sanity_check(args.input_files[0], genome)):
+    if not beta_sanity_check(args.input_files[0], genome):
         raise IllegalArgumentError('beta incompatible with genome')
 
     # load "full" reference - the one supplied with wgbstools
@@ -88,7 +92,7 @@ def read_reference(args):
 
 def betas2csv(args):
 
-    # set reference sites, as the intersection of the user input (--ref) 
+    # set reference sites, as the intersection of the user input (--ref)
     # and the "full" reference, supplied by wgbstools (ilmn2cpg_dict)
     df = read_reference(args)
     indices = np.array(df['cpg'])
@@ -130,7 +134,7 @@ def main():
     Output: a csv file with up to ~480K (or 850K) rows, for the Illumina array sites,
             and with columns corresponding to the beta files.
             all values are in range [0, 1], or NA.
-            Only works for hg19.
+            Only works for hg19 and hg38.
     """
     args = parse_args()
     if args.EPIC and args.ref:
@@ -141,4 +145,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

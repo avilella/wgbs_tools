@@ -1,17 +1,18 @@
 #!/usr/bin/python3 -u
 
-import os
 import tempfile
+import os
 import os.path as op
-import numpy as np
-import pandas as pd
 import sys
 from multiprocessing import Pool
 import argparse
 import subprocess
+import numpy as np
+import pandas as pd
 from utils_wgbs import IllegalArgumentError, eprint, segment_tool, add_GR_args, \
                        validate_file_list, validate_single_file, \
-                       add_multi_thread_args, GenomeRefPaths, validate_local_exe
+                       add_multi_thread_args, GenomeRefPaths, validate_local_exe, \
+                       beta_sanity_check
 from convert import add_bed_to_cpgs
 from genomic_region import GenomicRegion, index2chrom
 from beta_to_blocks import load_blocks_file
@@ -24,7 +25,7 @@ DEF_CHUNK = 60000
 def is_block_file_nice(df):
 
     # no duplicated blocks
-    if (df.shape[0] != df.drop_duplicates().shape[0]):
+    if df.shape[0] != df.drop_duplicates().shape[0]:
         msg = 'Some blocks are duplicated'
         return False, msg
 
@@ -62,7 +63,7 @@ class SegmentByChunks:
     def __init__(self, args, betas):
         self.betas = betas
         max_cpg = min(args.max_cpg, args.max_bp // 2)
-        assert (max_cpg > 1)
+        assert max_cpg > 1
         self.genome = GenomeRefPaths(args.genome)
         self.param_dict = {'betas': betas,
                           'pcount': args.pcount,
@@ -72,6 +73,13 @@ class SegmentByChunks:
                           'genome': self.genome
                           }
         self.args = args
+        self.validate_genome()
+
+    def validate_genome(self):
+        for beta in self.betas:
+            if not beta_sanity_check(beta, self.genome):
+                msg = f'[wt segment] ERROR: current genome reference ({self.genome.genome}) does not match the input beta file ({beta}).'
+                raise IllegalArgumentError(msg)
 
     def break_to_chunks(self):
         """ Break range of sites to chunks of size 'step',
@@ -98,7 +106,7 @@ class SegmentByChunks:
             if df.shape[0] > 2*1e4:
                 msg = '[wt segment] WARNING: bed file contains many regions.\n' \
                       '                      Segmentation will take a long time.\n' \
-                      f'                      Consider running w/o -L flag and intersect the results\n'
+                      '                      Consider running w/o -L flag and intersect the results\n'
                 eprint(msg)
 
         else:   # No bed file provided
@@ -113,13 +121,12 @@ class SegmentByChunks:
             else:
                 df = pd.DataFrame(columns=['startCpG', 'endCpG'], data=[gr.sites])
 
-        # build a DataFrame of chunks, with a "tag"/label field, 
+        # build a DataFrame of chunks, with a "tag"/label field,
         # so we know which chunks to merge later on.
-        rf = pd.DataFrame()
         tags = []
         starts = []
         ends = []
-        for ind, row in df.iterrows():
+        for _, row in df.iterrows():
             start, end = row
             bords = list(range(start, end, step)) + [end]
             tags += [f'{start}-{end}'] * (len(bords) -1)
@@ -130,31 +137,28 @@ class SegmentByChunks:
     def run(self):
         # break input region/s to small chunks
         tags, starts, ends = self.break_to_chunks()
-        # segment each chunk separately in a single thread
-        p = Pool(self.args.threads)
-        params = [(dict(self.param_dict, **{'sites': (s, e)}),) for s, e in zip(starts, ends)]
-        arr = p.starmap(segment_process, params)
-        p.close()
-        p.join()
 
-        # merge chunks from the same "tag" group 
-        # (i.e. the same chromosome, or the same region of the provided bed file)
-        df = pd.DataFrame()
-        for tag in set(tags):
-            carr = [arr[i] for i in range(len(arr)) if tags[i] == tag]
-            merged = self.merge_df_list(carr)
-            df = pd.concat([df, pd.DataFrame({'startCpG': merged[:-1], 'endCpG': merged[1:]})])
+        # Single Pool for the whole run — previously a fresh Pool was forked
+        # for the initial chunk pass AND inside every iteration of
+        # merge_df_list's pairwise-reduce while-loop.
+        with Pool(self.args.threads) as pool:
+            params = [(dict(self.param_dict, **{'sites': (s, e)}),) for s, e in zip(starts, ends)]
+            arr = pool.starmap(segment_process, params)
+
+            # merge chunks from the same "tag" group
+            # (i.e. the same chromosome, or the same region of the provided bed file)
+            df = pd.DataFrame()
+            for tag in set(tags):
+                carr = [arr[i] for i in range(len(arr)) if tags[i] == tag]
+                merged = self.merge_df_list(carr, pool)
+                df = pd.concat([df, pd.DataFrame({'startCpG': merged[:-1], 'endCpG': merged[1:]})])
         self.dump_result(df.reset_index(drop=True))
 
-    def merge_df_list(self, dflist):
+    def merge_df_list(self, dflist, pool):
         # Given a set of chunks to merge, recursively pairwise stich them.
-
         while len(dflist) > 1:
-            p = Pool(self.args.threads)
             params = [(dflist[i - 1], dflist[i], self.param_dict) for i in range(1, len(dflist), 2)]
-            arr = p.starmap(stitch_2_dfs, params)
-            p.close()
-            p.join()
+            arr = pool.starmap(stitch_2_dfs, params)
 
             last_df = [dflist[-1]] if len(dflist) % 2 else []
             dflist = arr + last_df
@@ -204,7 +208,6 @@ def stitch_2_dfs(b1, b2, params):
     n2 = b2[-1] - b2[0]
     patch1_size = min(50, n1)
     patch2_size = min(50, n2)
-    patch = np.array([], dtype=int)
     while patch1_size <= n1 and patch2_size <= n2:
         # calculate blocks for patch:
         start = b1[-1] - patch1_size #- 1
@@ -214,7 +217,7 @@ def stitch_2_dfs(b1, b2, params):
 
         # find the overlaps
         if is_2_overlap(b1, patch) and is_2_overlap(patch, b2):
-            # successful stitch with patches 
+            # successful stitch with patches
             return merge2(merge2(b1, patch), b2)
         else:
             # failed stitch - increase patch sizes

@@ -3,9 +3,10 @@
 import sys
 import argparse
 import importlib
+import importlib.util
 from unittest.mock import patch
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 
 commands = [
     # view data
@@ -42,6 +43,7 @@ commands = [
     'add_cpg_counts',
     'frag_len',
     'split_by_allele',
+    'split_by_meth',
     'test_bimodal'
 ]
 
@@ -49,7 +51,7 @@ def main():
     if len(sys.argv) < 2 or (len(sys.argv) == 2 and sys.argv[1] in ('-h', '--help')):
         print_help()
         return
-    elif '--version' in sys.argv:
+    if '--version' in sys.argv:
         print('wgbstools version', VERSION)
         return
 
@@ -58,16 +60,20 @@ def main():
         usage='wgbstools <command> [<args>]')
     parser.add_argument('command', help='Subcommand to run')
     args = parser.parse_args(sys.argv[1:2])
+
+    # Separate "no such command" from "command exists but its imports are broken"
+    try:
+        spec = importlib.util.find_spec(args.command)
+    except (ValueError, ModuleNotFoundError, ImportError):
+        spec = None
+    if spec is None:
+        print_invalid_command(args.command)
+        print_help()
+        return 1
+
     try:
         with patch.object(sys, 'argv', sys.argv[1:]):
             importlib.import_module(args.command).main()
-
-    except ModuleNotFoundError as e:
-        if args.command not in str(e):
-            raise e
-        print_invalid_command(args.command)
-        print_help()
-
     except ValueError as e:
         eprint(f'Invalid input argument\n{e}')
         return 1
@@ -79,11 +85,11 @@ def eprint(*args, **kwargs):
 def print_invalid_command(command):
     eprint('Invalid command:', f'\033[01;31m{command}\033[00m')
     from difflib import get_close_matches
-    closets = [x for x in get_close_matches(command, commands)]
+    closets = get_close_matches(command, commands)
     if closets:
         eprint(f'did you mean \033[01;32m{closets[0]}\033[00m?')
 
-def print_help(command=None):
+def print_help():
     msg = '\nUsage: wgbstools <command> [<args>]'
     msg += '\nrun wgbstools <command> -h for more information'
     msg += '\nOptional commands:\n'
@@ -94,4 +100,3 @@ def print_help(command=None):
 
 if __name__ == '__main__':
     main()
-

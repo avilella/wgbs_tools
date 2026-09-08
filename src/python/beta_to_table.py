@@ -1,16 +1,17 @@
 #!/usr/bin/python3 -u
 
 import argparse
-import numpy as np
 import sys
 import os.path as op
-import pandas as pd
+import warnings
 from multiprocessing import Pool
+import pandas as pd
+import numpy as np
 from dmb import load_gfile_helper, match_prefix_to_bin, load_uxm
 from beta_to_blocks import collapse_process, load_blocks_file, is_block_file_nice
 from utils_wgbs import validate_single_file, validate_file_list, eprint, \
     IllegalArgumentError, beta2vec, add_multi_thread_args, \
-    drop_dup_keep_order
+    drop_dup_keep_order, pretty_name
 
 
 def parse_args():
@@ -24,8 +25,8 @@ def parse_args():
                         help='groups csv file with at least 2 columns: name, group. beta files belong to the same group are averaged')
     parser.add_argument('--betas', nargs='+', help='beta files', required=True)
     parser.add_argument('--verbose', '-v', action='store_true')
-    parser.add_argument('-c', '--min_cov', type=int, default=4, help='Minimal coverage to be considered,'
-                        'In both groups. [4]')
+    parser.add_argument('-c', '--min_cov', type=int, default=4, help='Minimal coverage to be considered. '
+                        'blocks with less than MIN_COV site observations are considered as missing. [4]')
     parser.add_argument('--digits', type=int, default=2,
                         help='float percision (number of digits) [2]')
     parser.add_argument('--chunk_size', type=int, default=200000,
@@ -44,7 +45,7 @@ def groups_load_wrap(groups_file, betas):
         # otherwise generate dummy group file for all binary files in input_dir
         # first drop duplicated files, while keeping original order
         betas = drop_dup_keep_order(betas.copy())
-        fnames = [op.splitext(op.basename(b))[0] for b in betas]
+        fnames = [pretty_name(b) for b in betas]
         gf = pd.DataFrame(columns=['fname'], data=fnames)
         gf['group'] = gf['fname']
 
@@ -55,17 +56,17 @@ def groups_load_wrap(groups_file, betas):
     return gf
 
 
-def cwrap(beta_path, blocks_df, is_nice, min_cov, verbose):
-    # if verbose:
-    #   eprint('[wt table]', op.splitext(op.basename(beta_path))[0])
-    if beta_path.endswith('.beta'):
+def cwrap(beta_path, blocks_df, is_nice, min_cov):
+    if beta_path.endswith(('.beta', '.lbeta')):
         r = collapse_process(beta_path, blocks_df, is_nice)
         if r is None:
             return
         name = op.splitext(op.basename(beta_path))[0]
         return {name: beta2vec(r, min_cov)}
     else:
-        return {op.basename(beta_path)[:-4]: load_uxm(beta_path, blocks_df, 'U', min_cov)}
+        eprint(f'[wt table] WARNING: {beta_path} is not a beta/lbeta file')
+
+    return {op.basename(beta_path)[:-4]: load_uxm(beta_path, blocks_df, 'U', min_cov)}
 
 
 def get_table(blocks_df, gf, min_cov, threads=8, verbose=False, group=True):
@@ -74,33 +75,34 @@ def get_table(blocks_df, gf, min_cov, threads=8, verbose=False, group=True):
         eprint(f'[wt table] reducing to {blocks_df.shape[0]:,} blocks')
     betas = drop_dup_keep_order(gf['full_path'])
     p = Pool(threads)
-    params = [(b, blocks_df, is_nice, min_cov, verbose) for b in betas]
-    # arr = [cwrap(*p) for p in params] # todo: remove
+    params = [(b, blocks_df, is_nice, min_cov) for b in betas]
     arr = p.starmap(cwrap, params)
     p.close()
     p.join()
 
     dicts = [d for d in arr if d is not None]
     dres = {k: v for d in dicts for k, v in d.items()}
-    if not group:
-        for b in gf['fname']:
-            blocks_df[b] = dres[b]
-        return blocks_df
-
     if not dres:
         fbetas = gf['fname'].tolist()
         eprint(f'[ wt table ] failed reducing {fbetas} to blocks\n{blocks_df}')
         raise IllegalArgumentError()
+
     if dres[list(dres.keys())[0]].size != blocks_df.shape[0]:
         eprint('[ wt table] beta2block returned wrong number of values')
         raise IllegalArgumentError()
 
-    groups = drop_dup_keep_order(gf['group'])
-    with np.warnings.catch_warnings():
-        np.warnings.filterwarnings('ignore', r'Mean of empty slice')
-        for group in groups:
-            blocks_df[group] = np.nanmean(
-                np.concatenate([dres[k][None, :] for k in gf['fname'][gf['group'] == group]]), axis=0).T
+    blocks_df.reset_index(drop=True, inplace=True)
+    if not group:
+        return pd.concat([blocks_df, pd.DataFrame(dres)[gf['fname'].tolist()]], axis=1)
+
+    ugroups = drop_dup_keep_order(gf['group'])
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=RuntimeWarning)
+        empty_df = pd.DataFrame(index=blocks_df.index, columns=ugroups)
+        blocks_df = pd.concat([blocks_df, empty_df], axis=1)
+        for ugroup in ugroups:
+            blocks_df[ugroup] = np.nanmean(
+                np.concatenate([dres[k][None, :] for k in gf['fname'][gf['group'] == ugroup]]), axis=0).T
     return blocks_df
 
 
@@ -111,7 +113,7 @@ def betas2table(betas, blocks, groups_file, min_cov, threads=8, verbose=False):
     return get_table(blocks_df, gf, min_cov, threads, verbose)
 
 
-def dump(outpath, df, first, digits):
+def dump(outpath, df, first=True, digits=3):
     if first:
         header = True
         mode = 'w'

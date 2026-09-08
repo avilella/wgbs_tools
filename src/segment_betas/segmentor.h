@@ -9,6 +9,7 @@
 #include <vector>
 #include <fstream>
 #include <cstring>      // memset
+#include <cstdint>      // uint
 #include <algorithm>    // numeric_limits
 #include <math.h>
 
@@ -29,10 +30,8 @@ class segmentor {
     uint nr_sites = 0;
     float pseudo_count = 0;
     int max_cpg = 0;
-    double *mem = nullptr;
 
     void read_beta_file(const char *beta_path, float *data);
-    void cost_memoization(std::vector<float*> &all_data);
     void load_dists(uint32_t *dists);
     std::vector<int> traceback(const int *T);
 public:

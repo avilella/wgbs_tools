@@ -5,38 +5,12 @@
 #include <fstream>
 #include <regex>
 #include <sstream>
+#include "patter_utils.h"
 
-
-std::vector<std::string> line2tokens(const std::string &line) {
-    /** Break string line to words (a std::vector of string tokens) */
-    std::vector<std::string> result;
-    std::string cell;
-    std::stringstream lineStream(line);
-    while(getline(lineStream, cell, '\t'))
-        result.push_back(cell);
-    if (result.empty()) { throw std::runtime_error("line2tokens: tokens shouldn't be empty!"); }
-    return result;
-}
-
-void print_vec(std::vector<std::string> &vec){
-    /** print a vector to stderr, tab separated */
-    for (auto &j: vec)
-        std::cerr << j << std::endl;
-}
-
-std::string addCommas(int num) {
-    /** add commas to an integer, and return it as a string */
-    std::string s = std::to_string(num);
-    int n = s.length() - 3;
-    while (n > 0) {
-        s.insert(n, ",");
-        n -= 3;
-    }
-    return s;
-}
 
 int read_pos(std::string &read) { return std::stoi(line2tokens(read)[3]); }
 int read_mate_pos(std::string &read) { return std::stoi(line2tokens(read)[7]); }
+std::string read_chrom(std::string &read) { return line2tokens(read)[2]; }
 
 struct PairedEnd
 {
@@ -82,6 +56,7 @@ std::vector<std::string> flush_data(std::vector<std::string> &data,
 
     if (data.empty()) return data;
 
+    std::string last_chrom = read_chrom(data.at(data.size() - 1)); // get last chrom before sort
     std::sort (data.begin(), data.end());
     std::string dummy = "";
     std::vector<bool> flushed(data.size()); // mark which lines are flushed. The others will be returned as singles.
@@ -122,7 +97,9 @@ std::vector<std::string> flush_data(std::vector<std::string> &data,
             if (last_chunk && output_singles) {
                 pairs_vec.push_back(PairedEnd(data.at(i), dummy));
             } else {
-                optimistics.push_back(data.at(i));
+                if (read_chrom(data.at(i)) == last_chrom){
+                    optimistics.push_back(data.at(i));
+                }
             }
         }
     }
@@ -158,17 +135,30 @@ void action(bool output_singles) {
 
     std::ostream &outfile(std::cout);
 
-    int line_i = 0;
-    //clock_t begin = clock();
+    long long int line_i = 0;
     std::string log_pref = "[match maker] ";
-//    std::ios_base::sync_with_stdio(false);  // improves reading speed by x70
+    bool is_chrom_set = false;
     for (std::string line; std::getline(std::cin, line) && (line_i > -1); line_i++) {
+
+        // skip header lines
+        if ((!is_chrom_set) && (!line.empty()) && (line[0] == '@')){
+            std::cout << line << std::endl;
+            continue;
+        }
         
         // add chromosome to log prefix
-        if (line_i == 0) { log_pref += "[ " + line2tokens(line)[2] + " ] "; }
+        if (!is_chrom_set) { 
+            log_pref += "[ " + line2tokens(line)[2] + " ] "; 
+            is_chrom_set = true;
+        }
 
 
         data.push_back(line);
+        // If we moved to the next chromosome, flush data
+        std::string chrom = read_chrom(line);
+        if (line_i && (chrom != read_chrom(data.at(0)))){
+            data = flush_data(data, outfile, true, output_singles);
+        }
         if (line_i && (line_i % 50000 == 0)) {
         //if (line_i && (line_i % 2000 == 0)) {
 
@@ -189,7 +179,6 @@ void action(bool output_singles) {
     std::cerr << log_pref << "finished " << addCommas(line_i) << " lines." << std::endl;
     if (!(data.empty())) {
         std::cerr << log_pref << "Filtered " << addCommas(data.size()) << " unpaired reads" << std::endl;
-        //std::cerr << data[0];
     }
 }
 

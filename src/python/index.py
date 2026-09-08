@@ -22,7 +22,7 @@ class Bed:
     def __init__(self):
         self.suff = 'bed'
         self.tabix_flags = ' -p bed '
-        # incase current tabix version does not recognize 
+        # incase current tabix version does not recognize
         # the "-p bed" flag (https://github.com/nloyfer/wgbs_tools/issues/2):
         self.tabix_fallback_flags = ' -s 1 -b 2 -e 3 '
         self.sort_flags = '-k4,4n'
@@ -43,7 +43,10 @@ def tabix_fai_workaround(in_file):
 
         # only relevant for tabix versions (1.9-1.15)
         txt = sp.check_output('tabix --version', shell=True).decode()
-        tversion = float(txt.split()[2].split('.')[1])
+        tversion = txt.split()[2].split('.')[1]
+        if '-' in tversion:
+            tversion = tversion[:tversion.find('-')]
+        tversion = float(tversion)
         if tversion <= 9 or tversion >= 15:
             return
     except Exception:
@@ -163,4 +166,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

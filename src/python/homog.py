@@ -1,21 +1,41 @@
 #!/usr/bin/python3 -u
 
 import argparse
-import os
-import numpy as np
 import os.path as op
-import pandas as pd
 import sys
 import subprocess
 from io import StringIO
-from beta_to_blocks import load_blocks_file, is_block_file_nice
+import numpy as np
+import pandas as pd
+from beta_to_blocks import load_blocks_file
 from utils_wgbs import IllegalArgumentError, homog_tool, main_script, \
-        splitextgz, validate_file_list, COORDS_COLS5, validate_local_exe, \
-        mkdirp, delete_or_skip
+        validate_file_list, COORDS_COLS5, validate_local_exe, \
+        mkdirp, delete_or_skip, pretty_name
 
 
 def homog_log(*args, **kwargs):
     print('[ wt homog ]', *args, file=sys.stderr, **kwargs)
+
+
+def _blocks_are_sorted(df):
+    """Return True if blocks are sorted by startCpG (and endCpG as tiebreaker)."""
+    starts = df['startCpG'].values
+    ends = df['endCpG'].values
+    for i in range(1, len(starts)):
+        if starts[i] < starts[i - 1]:
+            return False
+        if starts[i] == starts[i - 1] and ends[i] < ends[i - 1]:
+            return False
+    return True
+
+
+def _validate_blocks_ignore_sort(df):
+    """Check block validity except sort order. Overlapping blocks are allowed. Returns (ok, msg)."""
+    if df[['startCpG', 'endCpG']].isna().values.sum() > 0:
+        return False, 'Some blocks are empty (NA)'
+    if not (df['endCpG'] - df['startCpG'] > 0).all():
+        return False, 'Some blocks are empty (startCpG==endCpG)'
+    return True, ''
 
 
 ######################################################
@@ -38,15 +58,21 @@ def trim_uxm_to_uint8(data, nr_bits):
     return res
 
 
-def ctool_wrap(pat, name, blocks_path, rates_cmd, view_full, verbose=False):
+def ctool_wrap(pat, name, blocks_path, rates_cmd, view_full, inclusive,
+               sort_blocks=False, verbose=False):
     if view_full:
-        cmd = f'zcat {pat}'
+        cmd = f'gunzip -c {pat}'
     else:
         cmd = f'{main_script} cview {pat} -L {blocks_path}'
     cmd += f' | {homog_tool} -b {blocks_path} -n {name} {rates_cmd}'
+    if inclusive:
+        cmd += ' --inclusive'
+    if sort_blocks:
+        cmd += ' --sort_blocks'
     se = None if verbose else subprocess.PIPE
     txt = subprocess.check_output(cmd, shell=True, stderr=se).decode()
-    # homog_log(cmd)
+    if verbose:
+        homog_log(cmd)
     names = list('UXM')
     df = pd.read_csv(StringIO(txt), sep='\t', header=None, names=names)
     if df.values.sum() == 0:
@@ -54,8 +80,10 @@ def ctool_wrap(pat, name, blocks_path, rates_cmd, view_full, verbose=False):
     return df
 
 
-def homog_process(pat, blocks, args, outdir, prefix):
-    name = splitextgz(op.basename(pat))[0]
+def homog_process(pat, blocks, args, outdir, prefix,
+                   sort_blocks=False, nodump=False):
+    # generate output path:
+    name = pretty_name(pat)
     if prefix is None:
         prefix = op.join(outdir, name)
     opath = prefix + '.uxm'
@@ -75,14 +103,27 @@ def homog_process(pat, blocks, args, outdir, prefix):
         th2 = round((l - 1) / l, 3)
         rate_cmd += f'0,{th1},{th2},1 '
 
-    # for a long marker file (>10K marker), 
+    # for a long marker file (>5K blocks),
     # parse the whole pat file instead of running "cview -L BED"
-    view_full = blocks.shape[0] > 1e4
+    view_full = blocks.shape[0] > 5e3
 
-    df = ctool_wrap(pat, name, args.blocks_file, rate_cmd, view_full, args.verbose)
-    df = pd.concat([blocks.reset_index(drop=True), df], axis=1)
-    df = blocks.merge(df, how='left', on=COORDS_COLS5)
+    df = ctool_wrap(pat, name, args.blocks_file, rate_cmd, view_full,
+                    args.inclusive, sort_blocks=sort_blocks, verbose=args.verbose)
 
+    if sort_blocks:
+        # C++ output is in sorted CpG order — restore to original block order
+        # Build mapping: for each row in sorted output, find its original position
+        sorted_starts = blocks['startCpG'].values.argsort(kind='stable')
+        inv_order = np.argsort(sorted_starts, kind='stable')
+        df = df.iloc[inv_order].reset_index(drop=True)
+
+    df = blocks.merge(
+        pd.concat([blocks[COORDS_COLS5].reset_index(drop=True), df], axis=1),
+        how='left', on=COORDS_COLS5,
+    )
+
+    if nodump:
+        return df
     if args.binary:
         trim_uxm_to_uint8(df[list('UXM')].values, args.nr_bits).tofile(opath)
     else:
@@ -110,15 +151,17 @@ def main():
     args = parse_args()
     if args.nr_bits not in (8 , 16):
         raise IllegalArgumentError('nr_bits must be in {8, 16}')
-    if args.rlen < 3:
-        raise IllegalArgumentError('rlen must be >= 3')
+    if args.rlen < 2:
+        raise IllegalArgumentError('rlen must be >= 2')
     if args.thresholds is not None:
         th = args.thresholds.split(',')
         if not len(th) == 2: # and th[0].is_number():
             raise IllegalArgumentError('Invalid thresholds')
         th = float(th[0]), float(th[1])
-        if not (1 > th[1] > th[0] > 0):
+        if not 1 > th[1] > th[0] > 0:
             raise IllegalArgumentError('Invalid thresholds')
+    elif args.rlen == 2:
+        raise IllegalArgumentError('for rlen==2, --thresholds must be specified')
     # make sure homog tool is valid:
     validate_local_exe(homog_tool)
 
@@ -129,14 +172,22 @@ def main():
 
     # load blocks:
     blocks_df = load_blocks_file(args.blocks_file)
-    is_nice, msg = is_block_file_nice(blocks_df)
-    # TODO: support unsorted block files
-    if not is_nice:
+
+    # validate blocks (allowing unsorted)
+    ok, msg = _validate_blocks_ignore_sort(blocks_df)
+    if not ok:
         homog_log(msg)
         raise IllegalArgumentError(f'Invalid blocks file: {args.blocks_file}')
 
+    # check if blocks need sorting (C++ binary handles it via --sort_blocks)
+    sort_blocks = not _blocks_are_sorted(blocks_df)
+    if sort_blocks:
+        homog_log(f'WARNING: blocks file is not sorted by startCpG. '
+                  f'C++ binary will sort internally.')
+
     for pat in sorted(pats):
-        homog_process(pat, blocks_df, args, outdir, prefix)
+        homog_process(pat, blocks_df, args, outdir, prefix,
+                      sort_blocks=sort_blocks)
 
 
 def parse_args():
@@ -147,6 +198,7 @@ def parse_args():
     output_parser.add_argument('-o', '--out_dir', help='output directory. Default is "."')
     output_parser.add_argument('-p', '--prefix', help='output prefix')
     parser.add_argument('--force', '-f', action='store_true', help='Overwrite files if exist')
+    parser.add_argument('--inclusive', action='store_true', help='consider the whole read. Opposite of "strict"')
     parser.add_argument('--verbose', '-v', action='store_true')
     parser.add_argument('--binary', action='store_true', help='Output binary files (uint8)')
     parser.add_argument('--genome', help='Genome reference name.')
@@ -158,8 +210,6 @@ def parse_args():
     parser.add_argument('--rlen', '-l', type=int, default=3,
             help='Minimal read length (in CpGs) to consider. Default is 3')
     parser.add_argument('--debug', '-d', action='store_true')
-    # todo: keep --bed for backward compatability
-
     return parser.parse_args()
 
 

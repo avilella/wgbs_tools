@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/doi/10.5281/zenodo.8164926.svg)](https://zenodo.org/badge/doi/10.5281/zenodo.8164926.svg)
+
 # wgbstools - suite for DNA methylation sequencing data representation, visualization, and analysis
 wgbstools is an extensive computational suite tailored for bisulfite sequencing data. 
 It allows fast access and ultra-compact representation of high-throughput data,
@@ -70,5 +72,18 @@ wgbstools vis *.beta -r chr3:119528843-119529245 --heatmap
 <!--![alt text](docs/img/colon.beta.png "beta vis example")-->
 <img src="docs/img/colon.beta.png" width="450" height="600" />
 
+### **UPDATE (2026-03-25):** 5hmC support (ONT, Biomodal DualSeq)
+wgbstools now supports modification-aware BAM files (ONT, Biomodal DualSeq) with automatic detection of MM/ML tags. Hydroxymethylated CpGs appear as `H` in PAT files and are visualized in yellow:
+
+<img src="tutorial/images/vis_5hmc.png" width="500" />
+
+See the [5hmC tutorial](tutorial/README.md#5hmc-support-ont-biomodal-dualseq) for details on `--cpc_call`, `--hmc`, and other options.
+
 ### Deconvolution
 To deconvolve tissues or blood samples, see our [UXM](https://github.com/nloyfer/UXM_deconv) software
+
+### References
+If you are using *wgbstools*, please cite:
+<br>[Loyfer *et al.* (2026)](https://www.life-science-alliance.org/content/9/4/e202503514) ‘wgbstools: A computational suite for DNA methylation sequencing data representation, visualization, and analysis’, *Life Science Alliance* ,2026.
+<br>[GEO [GSE186458](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE186458) | Genome browser sessions: [hg19](https://genome-euro.ucsc.edu/s/Tomkap/Atlas_hg19) | [hg38](https://genome-euro.ucsc.edu/s/Tomkap/Atlas_hg38)]
+

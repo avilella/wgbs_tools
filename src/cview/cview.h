@@ -10,52 +10,38 @@
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
-#include <math.h>
 #include <string>
 #include <stdlib.h>
 #include <array>
-#include <algorithm> // find in main
-#include <memory>    // unique_ptr
-
-
-#define SEP "\t"
+#include "../pipeline_wgbs/patter_utils.h"
 
 struct Block {
     int start;
     int end;
-    int count;
 };
 
-class Cview {
-    int32_t *counts;
+int read_blocks(const std::string &block_data, std::vector<Block> &borders);
 
-    bool debug;
-    bool verbose;
+class Cview {
     std::vector<Block> borders;
     int nr_blocks = 0;
     int cur_block_ind = 0;
     int min_cpgs = 0;
     bool strip;
     bool strict;
+    bool no_gaps;
     std::string blocks_path;
     std::string sites;
-
-    int read_blocks();
-
-    void dump(int *data, int width, std::string out_path);
+    bool verbose;
 
     int proc_line(std::vector <std::string> tokens);
-
-    int blocks_helper(std::istream &instream);
-    void output_vec(std::vector <std::string> &tokens);
     void pass_read(std::vector <std::string> &tokens);
-    void strip_read(std::vector <std::string> &tokens);
 
 public:
     Cview(std::string bpath, std::string in_sites, bool in_strict, 
-            bool in_strip, int in_min_cpgs, bool deb, bool ver):
+            bool in_strip, bool in_no_gaps, int in_min_cpgs, bool ver):
         blocks_path(bpath), sites(in_sites), strict(in_strict), 
-        strip(in_strip), min_cpgs(in_min_cpgs), debug(deb), verbose(ver) {}
+        strip(in_strip), no_gaps(in_no_gaps), min_cpgs(in_min_cpgs), verbose(ver) {}
 
     ~Cview() {}
 

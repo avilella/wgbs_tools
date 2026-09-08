@@ -1,18 +1,17 @@
 #!/usr/bin/python3 -u
 
 import argparse
+import subprocess
 from utils_wgbs import MAX_PAT_LEN, pat_sampler, validate_single_file, \
     add_GR_args, cview_tool, collapse_pat_script, \
     cview_extend_blocks_script, validate_local_exe
 from genomic_region import GenomicRegion
 from beta_to_blocks import load_blocks_file
-import subprocess
-import os.path as op
 
 
 def subprocess_wrap_sigpipe(cmd):
     try:
-        subprocess.check_call(cmd, shell=True)
+        subprocess.check_call(cmd, shell=True, executable='/bin/bash')
     except subprocess.CalledProcessError as e:
         if e.returncode != 141:   # e.g. if the output is piped to head
             raise e
@@ -32,16 +31,17 @@ def view_gr(pat, args, get_cmd=False):
         cmd = f'gunzip -c {pat} '
     else:
         s, e = gr.sites
-        ms = max(1, s - MAX_PAT_LEN)
+        mpl = MAX_PAT_LEN
+        if args.nanopore:
+            mpl = 100000
+        ms = max(1, s - mpl)
         cmd = f'tabix {pat} {gr.chrom}:{ms}-{e - 1} '
 
     view_flags = set_view_flags(args)
     cmd += f' | {cview_tool} --sites "{s}\t{e}" ' + view_flags
-    if hasattr(args, 'sub_sample') and args.sub_sample is not None:  # sub-sample reads
-        validate_local_exe(pat_sampler)
-        cmd += f' | {pat_sampler} {args.sub_sample} '
-    if not gr.is_whole():
-        cmd += f' | sort -k2,2n -k3,3'
+    cmd += add_subsample_cmd(args) # sub-sample reads
+    if not gr.is_whole() and (('no_sort' not in args) or (not args.no_sort)):
+        cmd += ' | sort -k2,2n -k3,3'
         if args.shuffle:
             cmd += 'R'
     cmd += f' | {collapse_pat_script} - '
@@ -52,6 +52,20 @@ def view_gr(pat, args, get_cmd=False):
     subprocess_wrap_sigpipe(cmd)
 
 
+def add_subsample_cmd(args):
+    if not hasattr(args, 'sub_sample') or args.sub_sample is None:
+        return ''
+
+    validate_local_exe(pat_sampler)
+    ss = args.sub_sample
+    rep = 1
+    th = 0.25
+    while ss > th:
+        rep *= 2
+        ss /= 2
+    cmd = f' | {pat_sampler} {ss:.6f} {rep} '
+    return cmd
+
 def set_view_flags(args):
     view_flags = ''
     if args.strip:
@@ -60,8 +74,8 @@ def set_view_flags(args):
         view_flags += ' --strict'
     if args.min_len > 1:
         view_flags += f' --min_cpgs {args.min_len}'
-    # if args.sub_sample:
-        # view_flags += f' --sub_sample {args.sub_sample}'
+    if args.no_gaps:
+        view_flags += ' --no_gaps'
     return view_flags
 
 
@@ -71,7 +85,7 @@ def view_bed(pat, args):
 
     # validate blocks file. If it's long, and starts with "chr1", use gunzip instead of tabix.
     df = load_blocks_file(bpath, nrows=1e6)
-    if df.shape[0] == 1e6 and df.iloc[0, 0] in ('1', 'chr1'):
+    if df.shape[0] >= 1e6 and df.iloc[0, 0] in ('1', 'chr1'):
         tabix_cmd = f'gunzip -c {pat} '
     else:
         # extended blocks:
@@ -80,9 +94,7 @@ def view_bed(pat, args):
 
     view_flags = set_view_flags(args)
     cmd = tabix_cmd + f' | {cview_tool} {view_flags} --blocks_path {bpath}'
-    if args.sub_sample is not None:  # sub-sample reads
-        validate_local_exe(pat_sampler)
-        cmd += f' | {pat_sampler} {args.sub_sample} '
+    cmd += add_subsample_cmd(args) # sub-sample reads
     cmd += f' | sort -k2,2n -k3,3 | {collapse_pat_script} - '
     if args.out_path is not None:
         cmd += f' > {args.out_path}'
@@ -102,8 +114,8 @@ def cview(pat, args):
 #                        #
 ##########################
 
-def add_view_flags(parser, sub_sample=True, out_path=True):
-    add_GR_args(parser, bed_file=True)
+def add_view_flags(parser, sub_sample=True, out_path=True, bed_file=True, long_reads=True):
+    add_GR_args(parser, bed_file=bed_file)
     parser.add_argument('--strict', action='store_true',
                         help='pat: Truncate reads that start/end outside the given region. '
                              'Only relevant if "region", "sites" '
@@ -112,14 +124,21 @@ def add_view_flags(parser, sub_sample=True, out_path=True):
                         help='pat: Remove trailing dots (from beginning/end of reads).')
     parser.add_argument('--min_len', type=int, default=1,
                         help='pat: Display only reads covering at least MIN_LEN CpG sites [1]')
+    parser.add_argument('--no_gaps', action='store_true',
+                        help='pat: Remove reads with gaps (dots) in them.')
     parser.add_argument('--shuffle', action='store_true',
                         help='pat: Shuffle reads order, while keeping the startCpG order '
                              '(sort -k2,2n -k3,3R)')
+    parser.add_argument('--no_sort', action='store_true',
+                        help='pat: Keep read order, as in the original pat file')
     if sub_sample:
-        parser.add_argument('--sub_sample', type=float, metavar='[0.0, 1.0]',
+        parser.add_argument('--sub_sample', type=float, #metavar='[0.0, 1.0]',
                             help='pat: subsample from reads. Only supported for pat')
     if out_path:
         parser.add_argument('-o', '--out_path', help='Output path. [stdout]')
+    if long_reads:
+        parser.add_argument('-np', '--nanopore', action='store_true',
+                help='BETA VERSION: pull very long reads starting before the requested region')
     return parser
 
 

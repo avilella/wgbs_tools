@@ -3,138 +3,52 @@
 //
 
 #include "add_cpg_counts.h"
-//#include <string_view>
-
-char METH = 'C';
-char UNMETH = 'T';
-char UNKNOWN = '.';
-std::string TAB = "\t";
 
 
-//bool DEBUG = true;
-bool DEBUG = false;
+/***************************************************
+ *                                                 *
+ *         Region string parsing                   *
+ *                                                 *
+ ***************************************************/
 
-std::string addCommas(int num) {
-    /** convert integer to string with commas */
-    auto s = std::to_string(num);
-    int n = s.length() - 3;
-    while (n > 0) {
-        s.insert(n, ",");
-        n -= 3;
-    }
-    return s;
-}
-
-/*
- * Input Arguments Parsering class
- */
-class InputParser{
-public:
-    InputParser (int &argc, char **argv){
-        for (int i=1; i < argc; ++i)
-            this->tokens.emplace_back(std::string(argv[i]));
-    }
-    const std::string& getCmdOption(const std::string &option) const{
-        std::vector<std::string>::const_iterator itr;
-        itr =  std::find(this->tokens.begin(), this->tokens.end(), option);
-        if (itr != this->tokens.end() && ++itr != this->tokens.end()){
-            return *itr;
-        }
-        static const std::string empty_string;
-        return empty_string;
-    }
-    bool cmdOptionExists(const std::string &option) const{
-        return std::find(this->tokens.begin(), this->tokens.end(), option)
-               != this->tokens.end();
-    }
-private:
-    std::vector <std::string> tokens;
-};
-
-/*
- * Interesting flags (paird-end):
- * read1, read2 = (99, 147)
- * read1, read2 = (83, 163)
- *
- * for single end:
- * 0 or 16
- * 2 or 18
- */
-
-std::vector <std::string> line2tokens(std::string &line) {
-    /** Break string line to words (a vector of string tokens) */
-    std::vector <std::string> result;
-    std::string cell;
-    std::stringstream lineStream(line);
-    while (getline(lineStream, cell, '\t')) {
-        result.push_back(cell);
-    }
-//    if (result.empty()) { throw std::runtime_error("line2tokens: tokens shouldn't be empty!"); }
-    return result;
-}
-
-void print_vec(std::vector <std::string> &vec) {
-    /** print a vector to stderr, tab separated */
-    for (auto &j: vec)
-        std::cerr << j << TAB;
-    std::cerr << std::endl;
-}
-
-void vec2string(std::vector <std::string> &vec) {
-    /** print a 5 items vector to stdout, tab separated */
-    if (vec.size() == 5)  // vec length must be either 5 or 0.
-        std::cout << vec[0] + TAB + vec[1] + TAB + vec[2] + TAB + vec[3] + TAB + vec[4] << std::endl;
-}
-
-
-int patter::find_cpg_inds_offset() {
-    /**
-     * Find the CpG-Index offset of the current chromosome.
-     * i.e., How many CpGs there are before the first CpG in the current chromosome
+std::vector<int> get_loci(std::string r){
+    /** Take region string and output start, end vector
+     *  Example: Input: chr1:1200-4500
+     *           Output: [1200, 4500]
      */
-
-    // Open file CpG.chrome.size
-    std::ifstream index_file(chrom_sz_path, std::ios::in);
-    if (!(index_file)) {
-        throw std::invalid_argument(" Error: Unable to read chrome_sizes path: " + chrom_sz_path);
-    }
-
-    // parse chrome size file, accumulate offset
-    int offset = 0;
-    for (std::string line_str; std::getline(index_file, line_str);) {
-        std::vector <std::string> tokens = line2tokens(line_str);
-        if (tokens[0] == chr) {
-            return offset;
-        } else {
-            offset += std::stoi(tokens[1]);
-        }
-    }
-    throw std::invalid_argument("Invalid chromosome " + chr);
-
+    std::vector<int> v;
+    std::string loci_str = r.substr(r.find(":") + 1);
+    int start = stoi(loci_str.substr(0, loci_str.find('-')));
+    v.push_back(start);
+    int end = stoi(loci_str.substr(loci_str.find("-") + 1));
+    v.push_back(end);
+    return v;
 }
 
-std::string exec(const char* cmd) {
-    /** Execute a command and load output to string */
-    std::array<char, 128> buffer;
-    std::string result;
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
-    if (!pipe) {
-        throw std::runtime_error("[ patter ] popen() failed!");
-    }
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
-    return result;
+std::string extend_region(std::string region){
+    /** Take region string and extend it by 1,000bp for each side
+     *  Example: Input:  chr1:1200-4500
+     *           Output: chr1:200-5500
+     */
+    std::string chrom = region.substr(0, region.find(":"));
+    std::vector<int> start_end_loci = get_loci(region);
+    int start = std::max(1, start_end_loci.at(0) - 1000);
+    int end = start_end_loci.at(1) + 1000;
+    return chrom + ":" + std::to_string(start) + "-" + std::to_string(end);
 }
 
-void patter::load_genome_ref() {
-    /** Load the genome reference, corresponding to chromosome */
+/***************************************************
+ *                                                 *
+ *         Loading reference                       *
+ *                                                 *
+ ***************************************************/
 
+std::vector<int> patter::load_genome_helper(std::string region, std::string cmd){
     // load the current chromosome sequence from the FASTA file
-    std::string cmd = "tabix " + ref_path + " " + region + " | cut -f2-3";
     std::string cur_chr = exec(cmd.c_str());
     if (cur_chr.length() == 0) {
         // If the region was empty due to lack of CpGs in range, bam2pat.py would have catched that earlier.
+        std::cerr << "[add_cpg_counts] Failed command: " << cmd << std::endl;
         throw std::invalid_argument("Error: Unable to read reference path: " + ref_path + " at " + region + ".");
     }
     std::stringstream ss(cur_chr);
@@ -146,58 +60,89 @@ void patter::load_genome_ref() {
         int locus = stoi(tokens[0]);
         int cpg_ind = stoi(tokens[1]);
         dict.insert(std::make_pair(locus, cpg_ind));
-        //std::cerr << locus << "  " << cpg_ind << std::endl;
         loci.push_back(locus);
     }
-    offset = loci.at(0);
-    //std::cerr << "offset: " << offset << std::endl;
     bsize = loci.at(loci.size() - 1);
     conv = new bool[bsize]();
-    for (int locus: loci) {
-        conv[locus] = true;
-    }
+    return loci;
 }
 
+int patter::update_conv(std::vector<int> loci, int start, int end, int counter) {
+    for (int i = counter; i < loci.size() ;i++) {
+        counter = i; // update counter to be same as i for case when we break the loop and want to start from last index
+        int locus = loci.at(i);
+        if (locus < start) { continue; } // ignore all locus that no in region [start, end]
+        if (locus >= start && locus <= end){
+            conv[locus] = true;
+        }
+        if (locus > end){ break; } // break loop in order to get update [start, end]
+    }
+    return counter;
+}
 
-std::string patter::clean_CIGAR(std::string seq, std::string CIGAR) {
+void patter::load_genome_ref() {
+    /** Load the genome reference, corresponding to chromosome */
 
-    /** use CIGAR string to adjust 'seq' so it will be comparable to the reference.
-     * e.g, remove false letters ('I'), insert fictive letters ('D') etc. */
+    if (bed_file.empty()) { // CASE region
+        if (region.find(':') != std::string::npos) { // CASE for region=chr:start-end
 
-    // parse CIGAR and convert it to a couple of vectors: chars, nums.
-    // e.g, '2S9M' will become ['S', 'M'] and [2, 9]
-    std::vector<char> chars;
-    std::vector<unsigned long> nums;
-    std::string cur_num;
-    for (auto c: CIGAR) {
-        if (isdigit(c)) {
-            cur_num.push_back(c);
-        } else {
-            nums.push_back(stoul(cur_num));
-            cur_num.clear();
-            chars.push_back(c);
+            std::string extend_r = extend_region(region);
+            std::string cmd = "tabix " + ref_path + " " + extend_r + " | cut -f2-3";
+            std::vector <int> loci = load_genome_helper(extend_r, cmd); // init dict base on extended region (for reads with more cpgs than the region)
+
+            // init conv base on original region
+            std::vector<int> start_end_loci = get_loci(region);
+            int start = start_end_loci.at(0);
+            int end = start_end_loci.at(1);
+            update_conv(loci, start, end, 0);
+        } else { // CASE for region=chr
+            std::string cmd = "tabix " + ref_path + " " + region + " | cut -f2-3";
+            std::vector<int> loci = load_genome_helper(region, cmd);
+            for (int locus: loci) {
+                conv[locus] = true;
+            }
+        }
+    } else { // CASE for bed file
+        std::string chrom = region;  // in bed file case: region=chr
+        std::string cmd = "tabix " + ref_path + " -R " + bed_ext_file + " | grep -w " + chrom  + " | cut -f2-3";
+        // init dict base on extended bed file (for reads with more cpgs than the original region)
+        std::vector<int> loci = load_genome_helper(chrom, cmd);
+
+        // init conv base on original bed file
+        cmd = "cat " + bed_file + " | grep -w " + chrom;
+        std::string bed_chrs = exec(cmd.c_str());
+        if (bed_chrs.length() == 0) {
+            std::cerr << "no markers for chrom " << chrom << std::endl;
+        }
+        std::stringstream bed_chrs_ss(bed_chrs);
+        int counter = 0;
+        int prev_end = 0;
+        int prev_start = 0;
+        std::vector<std::string> tokens;
+        for (std::string line_str; std::getline(bed_chrs_ss, line_str, '\n');) {
+            tokens = line2tokens(line_str);
+            int start = stoi(tokens[1]);
+            int end = stoi(tokens[2]);
+            // validate bed regions
+            if (start >= end){
+                throw std::invalid_argument("[add_cpg_count] [" + chrom + "] Error: bed file is not valid, start larger than end: " + line_str);
+            }
+            if (start < prev_start){
+                throw std::invalid_argument("[add_bed_count] [" + chrom + "] Error: bed file is not sorted");
+            }
+            counter = update_conv(loci, start, end, counter);
+            prev_end = end;
+            prev_start = start;
         }
     }
 
-    // build the adjusted seq, using original seq and the vectors:
-    std::string adjusted_seq;
-    for (int i = 0; i < (int) chars.size(); i++) {
-        if (chars[i] == 'M') {
-            adjusted_seq += seq.substr(0, nums[i]);
-            seq = seq.substr(nums[i], seq.length() - nums[i]);
-        } else if (chars[i] == 'D') {
-            for (unsigned long j = 0; j < nums[i]; j++)
-                adjusted_seq += 'N';
-        } else if ((chars[i] == 'I') || (chars[i] == 'S')) {
-            seq = seq.substr(nums[i], seq.length() - nums[i]);
-        } else {
-            throw std::invalid_argument("Unknown CIGAR character: " +
-                                        std::string(1, chars[i]));
-        }
-    }
-
-    return adjusted_seq;
 }
+
+/***************************************************
+ *                                                 *
+ *         patter stuff                            *
+ *                                                 *
+ ***************************************************/
 
 
 int patter::locus2CpGIndex(int locus) {
@@ -214,18 +159,6 @@ int patter::locus2CpGIndex(int locus) {
     return start_site;
 }
 
-int strip_pat(std::string &pat) {
-    // remove dots from the tail (e.g. CCT.C.... -> CCT.C)
-    pat = pat.substr(0, pat.find_last_not_of(UNKNOWN) + 1);
-    if (pat == "") { return -1; }
-    // remove dots from the head (..CCT -> CCT)
-    int pos = pat.find_first_not_of(UNKNOWN);
-    if (pos > 0) {
-        pat = pat.substr(pos, pat.length() - pos);
-    }
-    return pos;
-}
-
 int patter::compareSeqToRef(std::string &seq,
                             int start_locus,
                             int samflag,
@@ -234,15 +167,8 @@ int patter::compareSeqToRef(std::string &seq,
      * the CpG index of the first CpG site in the seq (or -1 if there is none) */
 
     // get orientation
-    bool bottom;
-    if (is_paired_end) {
-        bottom = ( ((samflag & 0x53) == 83) || ((samflag & 0xA3) == 163) );
-    } else {
-        bottom = ((samflag & 0x10) == 16);
-    }
+    bool bottom = is_bottom(samflag, is_paired_end);
     ReadOrient ro = bottom ? OB : OT;
-
-    bool skip_mbias = true;
 
     // generate the methylation pattern (e.g 'CC.TC'),
     // by comparing the given sequence to reference at the CpG indexes
@@ -257,17 +183,14 @@ int patter::compareSeqToRef(std::string &seq,
         if (start_locus + 1 > (bsize - 1)) {
             continue;
         }
-//        if (i >= MAX_READ_LEN) {skip_mbias = false;}
         if (conv[start_locus + i]) {
             j = i + ro.shift;
             char s = seq[j];
             cur_status = UNKNOWN;
             if (s == ro.unmeth_seq_chr) {
                 cur_status = UNMETH;
-//                if (!skip_mbias) mb[mbias_ind].unmeth[j]++;
             } else if (s == ro.ref_chr) {
                 cur_status = METH;
-//                if (!skip_mbias) mb[mbias_ind].meth[j]++;
             }
             // ignore first/last 'clip_size' characters, since they are often biased
             if (!((j >= clip_size) && (j < seq.size() - clip_size))) {
@@ -517,6 +440,7 @@ void patter::print_stats_msg() {
     /** print informative summary message */
     int sucess = line_i ? int((1.0 - ((double) readsStats.nr_invalid / line_i)) * 100.0) : 0;
 
+    if (chr == "") {return;}
     std::string msg = "[ " + chr + " ] ";
     msg += "finished " + std::to_string(line_i) + " lines. ";
     if (is_paired_end) {
@@ -538,14 +462,6 @@ void patter::print_progress(){
         std::cerr << "[ " + chr + " ]" << " line " << addCommas(line_i)
                   << " in " << std::setprecision(2) << elapsed_secs << " minutes." << std::endl;
     }
-}
-
-bool are_paired(std::vector <std::string> tokens1,
-                std::vector <std::string> tokens2) {
-    // return true iff the reads are non empty and paired
-    return ((!(tokens2.empty())) &&
-            (!(tokens1.empty())) &&
-            (tokens1[0] == tokens2[0]));
 }
 
 void patter::proc_sam_in_stream(std::istream& in) {
@@ -595,11 +511,9 @@ void patter::action_sam(std::string samFilePath) {
 
     if (!(samFile)){
         proc_sam_in_stream(std::cin);
-    } else {
-        if (samFile.is_open()) {
-            proc_sam_in_stream(samFile);
-            samFile.close();
-        }
+    } else if (samFile.is_open()) {
+        proc_sam_in_stream(samFile);
+        samFile.close();
     }
     print_stats_msg();
 }
@@ -618,25 +532,15 @@ void patter::initialize_patter(std::string &line_str) {
     load_genome_ref();
 }
 
-bool is_number(const std::string& s)
-{
-    std::string::const_iterator it = s.begin();
-    while (it != s.end() && std::isdigit(*it)) ++it;
-    return !s.empty() && it == s.end();
-}
-
+/***************************************************
+ *                                                 *
+ *                  Main                           *
+ *                                                 *
+ ***************************************************/
 
 int main(int argc, char **argv) {
     clock_t begin = clock();
     try {
-//        std::string genome_name = "/cs/cbio/netanel/tools/wgbs_tools/references/hg19/genome.fa";
-//        std::string chrom_dict_path = "/cs/cbio/jon/projects/PyCharmProjects/wgbs_tools/references/hg19/CpG.bed.gz";
-//
-////        std::string chrom_dict_path = "/cs/cbio/netanel/tools/wgbs_tools/references/hg19/CpG.bed.gz";
-//        std::string bam_path = "/cs/zbio/jrosensk/twist_out/small_match_made.sam";
-//        std::string rgn = "chr1";
-//        patter p(chrom_dict_path, rgn, 0, 0);
-//        p.action_sam(bam_path);
         InputParser input(argc, argv);
         int min_cpg = 1;
         if (input.cmdOptionExists("--min_cpg")){
@@ -656,12 +560,14 @@ int main(int argc, char **argv) {
         if (input.cmdOptionExists("--pat")){
             print_pat = true;
         }
+        std::string bed_file = input.getCmdOption("--bed_file");
+        std::string bed_ext_file = input.getCmdOption("--bed_ext_file");
         if (argc >= 4) {
-            patter p(argv[1], argv[2], min_cpg, clip, print_pat);
+            patter p(argv[1], argv[2], min_cpg, clip, print_pat, bed_file, bed_ext_file);
             p.action_sam("");
         } else{
 
-            throw std::invalid_argument("Usage: add_cpg_counts CPG_CHROM_SIZE_PATH bam_input [--min_cpg MIN_CPG_PER_READ] [--clip CLIP]");
+            throw std::invalid_argument("Usage: add_cpg counts CPG_CHROM_SIZE_PATH bam_input --bed_file BED_FILE --bed_ext_file BED_EXT_FILE [--min_cpg MIN_CPG_PER_READ] [--clip CLIP] ");
         }
     }
     catch (std::exception &e) {
@@ -669,9 +575,6 @@ int main(int argc, char **argv) {
         std::cerr << e.what() << std::endl;
         return 1;
     }
-    clock_t end = clock();
-    double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
-    std::cerr << elapsed_secs << std::endl;
     return 0;
 }
 
